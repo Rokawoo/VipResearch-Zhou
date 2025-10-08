@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Any
 import json
 from dataclasses import dataclass, asdict
 import warnings
+import os
 warnings.filterwarnings('ignore')
 
 # Check for CUDA availability
@@ -72,10 +73,7 @@ class VLACaptionGenerator:
         )
         
         print("Loading caption model...")
-        # Use smaller BLIP-2 variant for better performance
-        self.caption_processor = Blip2Processor.from_pretrained(
-            "Salesforce/blip2-opt-2.7b"
-        )
+        self.caption_processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
         self.caption_model = Blip2ForConditionalGeneration.from_pretrained(
             "Salesforce/blip2-opt-2.7b",
             dtype=torch.float16 if DEVICE == 'cuda' else torch.float32,
@@ -85,9 +83,7 @@ class VLACaptionGenerator:
             self.caption_model = self.caption_model.to(DEVICE)
         
         print("Loading object detection model...")
-        self.detector_processor = DetrImageProcessor.from_pretrained(
-            "facebook/detr-resnet-50"
-        )
+        self.detector_processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
         self.detector_model = DetrForObjectDetection.from_pretrained(
             "facebook/detr-resnet-50"
         ).to(DEVICE)
@@ -95,17 +91,7 @@ class VLACaptionGenerator:
         print("Models loaded successfully!")
     
     def generate_caption(self, image_path: str, task_context: Optional[str] = None) -> VLACaption:
-        """
-        Main entry point - generates complete VLA caption
-        
-        Args:
-            image_path: Path to image file
-            task_context: Optional context like "kitchen cleaning"
-        
-        Returns:
-            VLACaption object with all information
-        """
-        # Load image
+        """Generate complete VLA caption for an image"""
         image = Image.open(image_path).convert('RGB')
         
         # Detect objects
@@ -162,18 +148,13 @@ class VLACaptionGenerator:
             obj = {
                 "label": self.detector_model.config.id2label[label.item()],
                 "bbox": norm_bbox,
-                "center": [
-                    (norm_bbox[0] + norm_bbox[2]) / 2,
-                    (norm_bbox[1] + norm_bbox[3]) / 2
-                ],
+                "center": [(norm_bbox[0] + norm_bbox[2]) / 2, (norm_bbox[1] + norm_bbox[3]) / 2],
                 "confidence": float(score.item()),
                 "size": self._get_size(norm_bbox)
             }
             objects.append(obj)
         
-        # Sort by confidence, limit to top 10
-        objects = sorted(objects, key=lambda x: x['confidence'], reverse=True)[:10]
-        return objects
+        return sorted(objects, key=lambda x: x['confidence'], reverse=True)[:10]
     
     def _get_size(self, bbox: List[float]) -> str:
         """Estimate object size from bbox"""
@@ -182,90 +163,51 @@ class VLACaptionGenerator:
             return "large"
         elif area > 0.05:
             return "medium"
-        else:
-            return "small"
+        return "small"
+    
+    def _generate_with_prompt(self, image: Image.Image, prompt: str, max_tokens: int, min_tokens: int = 1) -> str:
+        """Helper method to generate text with BLIP-2"""
+        inputs = self.caption_processor(image, text=prompt, return_tensors="pt")
+        inputs = {k: v.to(DEVICE) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            ids = self.caption_model.generate(**inputs, max_new_tokens=max_tokens, min_new_tokens=min_tokens)
+        
+        full_response = self.caption_processor.batch_decode(ids, skip_special_tokens=True)[0]
+        return full_response.replace(prompt, "").strip()
     
     def _generate_task_command(self, image: Image.Image, context: Optional[str]) -> str:
         """Generate high-level task"""
-        if context:
-            prompt = f"This is a {context} task. What should be done? Give one short command:"
-        else:
-            prompt = "What task should be performed here? Give one short command:"
+        prompt = f"This is a {context} task. What should be done? Give one short command:" if context else \
+                 "What task should be performed here? Give one short command:"
         
-        inputs = self.caption_processor(image, text=prompt, return_tensors="pt")
-        inputs = {k: v.to(DEVICE) if isinstance(v, torch.Tensor) else v 
-                 for k, v in inputs.items()}
-        
-        with torch.no_grad():
-            ids = self.caption_model.generate(**inputs, max_new_tokens=15, min_new_tokens=2)
-        
-        # The response includes the prompt, so we need to decode properly
-        full_response = self.caption_processor.batch_decode(ids, skip_special_tokens=True)[0]
-        
-        # Remove the prompt from the response
-        response = full_response.replace(prompt, "").strip()
-        
-        # Only use fallback if truly empty
-        if not response:
-            response = "organize the scene"
-        
-        return response
+        response = self._generate_with_prompt(image, prompt, 15, 2)
+        return response if response else "organize the scene"
     
     def _generate_subtask(self, image: Image.Image, objects: List[Dict], task: str) -> str:
         """Generate current subtask"""
         if not objects:
             return "explore the scene"
         
-        # Use detected objects in prompt
         obj_list = ", ".join([obj["label"] for obj in objects[:3]])
         prompt = f"Task: {task}. Objects: {obj_list}. Current subtask:"
         
-        inputs = self.caption_processor(image, text=prompt, return_tensors="pt")
-        inputs = {k: v.to(DEVICE) if isinstance(v, torch.Tensor) else v 
-                 for k, v in inputs.items()}
-        
-        with torch.no_grad():
-            ids = self.caption_model.generate(**inputs, max_new_tokens=20, min_new_tokens=2)
-        
-        full_response = self.caption_processor.batch_decode(ids, skip_special_tokens=True)[0]
-        response = full_response.replace(prompt, "").strip()
-        
-        # Only fallback if empty
-        if not response:
-            response = f"pick up {objects[0]['label']}"
-        
-        return response
+        response = self._generate_with_prompt(image, prompt, 20, 2)
+        return response if response else f"pick up {objects[0]['label']}"
     
     def _generate_action(self, image: Image.Image, objects: List[Dict], subtask: str) -> str:
         """Generate low-level action with position using AI"""
         if not objects:
             return "scan environment for objects"
         
-        # Find relevant object for position
-        target_obj = None
-        for obj in objects:
-            if obj["label"].lower() in subtask.lower():
-                target_obj = obj
-                break
+        # Find relevant object
+        target_obj = next((obj for obj in objects if obj["label"].lower() in subtask.lower()), objects[0])
         
-        if not target_obj:
-            target_obj = objects[0]
-        
-        # Use AI to generate action description
         x, y = target_obj["center"]
         prompt = f"Robot task: {subtask}. Target: {target_obj['label']} at ({x:.2f}, {y:.2f}). Describe gripper action:"
         
-        inputs = self.caption_processor(image, text=prompt, return_tensors="pt")
-        inputs = {k: v.to(DEVICE) if isinstance(v, torch.Tensor) else v 
-                 for k, v in inputs.items()}
+        action = self._generate_with_prompt(image, prompt, 25, 3)
         
-        with torch.no_grad():
-            ids = self.caption_model.generate(**inputs, max_new_tokens=25, min_new_tokens=3)
-        
-        full_response = self.caption_processor.batch_decode(ids, skip_special_tokens=True)[0]
-        action = full_response.replace(prompt, "").strip()
-        
-        # Fallback only if empty
         if not action:
             action = f"move gripper to {target_obj['label']} at position ({x:.2f}, {y:.2f})"
             if target_obj["size"] == "small":
@@ -279,14 +221,13 @@ class VLACaptionGenerator:
         """Extract spatial relationships"""
         relations = []
         
-        # Compare pairs of objects
         for i, obj1 in enumerate(objects[:4]):
             for obj2 in objects[i+1:5]:
                 rel = self._compute_relation(obj1, obj2)
                 if rel:
                     relations.append(rel)
         
-        return relations[:5]  # Limit to 5 relations
+        return relations[:5]
     
     def _compute_relation(self, obj1: Dict, obj2: Dict) -> Optional[str]:
         """Compute spatial relation between two objects"""
@@ -300,7 +241,7 @@ class VLACaptionGenerator:
             elif dy < -0.1:
                 return f"{obj1['label']} below {obj2['label']}"
         
-        # Horizontal relations  
+        # Horizontal relations
         if abs(dy) < 0.1:
             if dx > 0.1:
                 return f"{obj1['label']} left of {obj2['label']}"
@@ -308,8 +249,7 @@ class VLACaptionGenerator:
                 return f"{obj1['label']} right of {obj2['label']}"
         
         # Proximity
-        dist = np.sqrt(dx**2 + dy**2)
-        if dist < 0.15:
+        if np.sqrt(dx**2 + dy**2) < 0.15:
             return f"{obj1['label']} near {obj2['label']}"
         
         return None
@@ -317,49 +257,27 @@ class VLACaptionGenerator:
     def _identify_scene(self, image: Image.Image) -> str:
         """Identify scene type"""
         prompt = "What room or scene is this? Answer in one word:"
-        
-        inputs = self.caption_processor(image, text=prompt, return_tensors="pt")
-        inputs = {k: v.to(DEVICE) if isinstance(v, torch.Tensor) else v 
-                 for k, v in inputs.items()}
-        
-        with torch.no_grad():
-            ids = self.caption_model.generate(**inputs, max_new_tokens=10, min_new_tokens=1)
-        
-        full_response = self.caption_processor.batch_decode(ids, skip_special_tokens=True)[0]
-        scene = full_response.replace(prompt, "").strip().lower()
-        
-        # Keep the AI response, only use fallback if empty
-        if not scene:
-            scene = "general"
-        
-        return scene
+        scene = self._generate_with_prompt(image, prompt, 10, 1).lower()
+        return scene if scene else "general"
     
     def save_annotated_image(self, image_path: str, caption: VLACaption, output_path: str):
         """Save image with caption annotations overlay"""
         image = Image.open(image_path).convert('RGB')
         draw = ImageDraw.Draw(image)
         
-        # Color palette for different confidence levels
-        def get_color(confidence):
-            if confidence > 0.8:
-                return (0, 255, 0)  # Green for high confidence
-            elif confidence > 0.6:
-                return (255, 255, 0)  # Yellow for medium confidence
-            else:
-                return (255, 0, 0)  # Red for low confidence
+        # Color based on confidence
+        get_color = lambda conf: (0, 255, 0) if conf > 0.8 else (255, 255, 0) if conf > 0.6 else (255, 0, 0)
         
-        # Try to use a better font if available
+        # Load fonts
         try:
             font = ImageFont.truetype("arial.ttf", 16)
             font_small = ImageFont.truetype("arial.ttf", 12)
         except:
-            font = ImageFont.load_default()
-            font_small = ImageFont.load_default()
+            font = font_small = ImageFont.load_default()
         
-        # Draw bounding boxes and labels for detected objects
-        for i, obj in enumerate(caption.objects[:10]):  # Show top 10 objects
+        # Draw bounding boxes and labels
+        for obj in caption.objects[:10]:
             bbox = obj["bbox"]
-            # Convert normalized coords to pixels
             x1 = int(bbox[0] * image.width)
             y1 = int(bbox[1] * image.height)
             x2 = int(bbox[2] * image.width)
@@ -367,70 +285,62 @@ class VLACaptionGenerator:
             
             color = get_color(obj["confidence"])
             
-            # Draw rectangle
+            # Draw rectangle and center point
             draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
-            
-            # Draw center point
-            cx, cy = obj["center"]
-            cx_px = int(cx * image.width)
-            cy_px = int(cy * image.height)
+            cx_px = int(obj["center"][0] * image.width)
+            cy_px = int(obj["center"][1] * image.height)
             draw.ellipse([cx_px-5, cy_px-5, cx_px+5, cy_px+5], fill=color, outline=(255, 255, 255))
             
             # Draw label with background
             label = f"{obj['label']} ({obj['confidence']:.0%})"
-            
-            # Get text size for background
             bbox_text = draw.textbbox((x1, y1), label, font=font_small)
             text_width = bbox_text[2] - bbox_text[0]
             text_height = bbox_text[3] - bbox_text[1]
             
-            # Draw background rectangle for text
-            draw.rectangle([x1, y1-text_height-4, x1+text_width+4, y1], fill=(0, 0, 0, 200))
-            
-            # Draw text
+            draw.rectangle([x1, y1-text_height-4, x1+text_width+4, y1], fill=(0, 0, 0))
             draw.text((x1+2, y1-text_height-2), label, fill=color, font=font_small)
             
-            # Draw position coordinates
-            pos_text = f"({cx:.2f}, {cy:.2f})"
-            draw.text((cx_px+10, cy_px), pos_text, fill=(255, 255, 255), font=font_small)
+            # Draw position
+            draw.text((cx_px+10, cy_px), f"({obj['center'][0]:.2f}, {obj['center'][1]:.2f})", 
+                     fill=(255, 255, 255), font=font_small)
         
-        # Add caption information at the top with background
+        # Top left info panel with background
+        overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        overlay_draw.rectangle([0, 0, 400, 120], fill=(0, 0, 0, 200))
+        
+        # Top right spatial relations panel
+        if caption.spatial_relations:
+            overlay_draw.rectangle([image.width-250, 0, image.width, 100], fill=(0, 0, 0, 200))
+        
+        image = Image.alpha_composite(image.convert('RGBA'), overlay).convert('RGB')
+        draw = ImageDraw.Draw(image)
+        
+        # Draw info text (top left)
         info_lines = [
             f"Scene: {caption.scene_type}",
             f"Task: {caption.task_command}",
             f"Subtask: {caption.subtask}",
-            f"Action: {caption.action_description[:50]}...",
+            f"Action: {caption.action_description[:45]}...",
             f"Confidence: {caption.confidence:.1%}",
-            f"Objects Detected: {len(caption.objects)}"
+            f"Objects: {len(caption.objects)}"
         ]
         
-        # Draw semi-transparent background for text
-        overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
-        overlay_draw = ImageDraw.Draw(overlay)
-        overlay_draw.rectangle([0, 0, image.width, 120], fill=(0, 0, 0, 180))
-        
-        # Composite overlay
-        image = Image.alpha_composite(image.convert('RGBA'), overlay).convert('RGB')
-        draw = ImageDraw.Draw(image)
-        
-        # Draw info text
         y_offset = 10
         for line in info_lines:
             draw.text((10, y_offset), line, fill=(255, 255, 255), font=font)
             y_offset += 18
         
-        # Add spatial relations on the right side if present
+        # Draw spatial relations (top right)
         if caption.spatial_relations:
-            y_offset = 130
-            draw.text((10, y_offset), "Spatial Relations:", fill=(255, 255, 0), font=font)
-            y_offset += 20
-            for rel in caption.spatial_relations[:3]:
-                draw.text((20, y_offset), f"• {rel}", fill=(200, 200, 200), font=font_small)
+            draw.text((image.width-240, 10), "Spatial Relations:", fill=(255, 255, 0), font=font)
+            y_offset = 30
+            for rel in caption.spatial_relations[:4]:
+                draw.text((image.width-240, y_offset), f"> {rel}", fill=(200, 200, 200), font=font_small)
                 y_offset += 15
         
-        # Save annotated image
         image.save(output_path, 'PNG')
-        print(f"✅ Annotated image saved as: {output_path}")
+        print(f"Annotated image saved: {output_path}")
     
     def process_batch(self, image_paths: List[str], output_file: str = "captions.json"):
         """Process multiple images and save results"""
@@ -445,9 +355,7 @@ class VLACaptionGenerator:
                 results.append(result)
             except Exception as e:
                 print(f"  Error: {e}")
-                continue
         
-        # Save results
         with open(output_file, 'w') as f:
             json.dump(results, f, indent=2)
         
@@ -458,7 +366,8 @@ class VLACaptionGenerator:
 def main():
     """Example usage and test"""
     import sys
-    import os
+    import urllib.request
+    import tempfile
     
     # Initialize generator
     print("Initializing VLA Caption Generator...")
@@ -471,11 +380,8 @@ def main():
         output_file = sys.argv[3] if len(sys.argv) > 3 else "caption_output.json"
     else:
         # Use example image
-        import urllib.request
-        import tempfile
-        
         print("\nDownloading example image...")
-        url = "https://images.unsplash.com/photo-1556909114-f6e7ad7d3136?w=800"
+        url = "https://www.gardeningchores.com/wp-content/uploads/2021/01/Rocambole-Hardneck-garlic-768x528.jpg"
         with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
             urllib.request.urlretrieve(url, tmp.name)
             image_path = tmp.name
@@ -490,7 +396,10 @@ def main():
     
     caption = generator.generate_caption(image_path, task_context)
     
-    # Save to JSON file
+    # Save outputs
+    output_base = os.path.splitext(output_file)[0]
+    
+    # JSON output
     output_data = {
         "image_path": image_path,
         "task_context": task_context,
@@ -501,18 +410,14 @@ def main():
     
     with open(output_file, 'w') as f:
         json.dump(output_data, f, indent=2)
+    print(f"\nCaption saved: {output_file}")
     
-    print(f"\n✅ Caption saved to: {output_file}")
-    
-    # Save annotated image
-    annotated_file = output_file.replace('.json', '_annotated.png')
-    if annotated_file == output_file:  # If no .json extension
-        annotated_file = os.path.splitext(output_file)[0] + '_annotated.png'
-    
+    # Annotated image
+    annotated_file = f"{output_base}_annotated.png"
     generator.save_annotated_image(image_path, caption, annotated_file)
     
-    # Also save human-readable format
-    txt_file = output_file.replace('.json', '.txt')
+    # Text output
+    txt_file = f"{output_base}.txt"
     with open(txt_file, 'w') as f:
         f.write("="*60 + "\n")
         f.write("VLA CAPTION RESULTS\n")
@@ -527,15 +432,15 @@ def main():
         
         f.write(f"Objects Detected ({len(caption.objects)}):\n")
         for obj in caption.objects[:5]:
-            f.write(f"  • {obj['label']}: pos({obj['center'][0]:.2f}, {obj['center'][1]:.2f}), ")
+            f.write(f"  > {obj['label']}: pos({obj['center'][0]:.2f}, {obj['center'][1]:.2f}), ")
             f.write(f"size={obj['size']}, conf={obj['confidence']:.2%}\n")
         
         if caption.spatial_relations:
             f.write("\nSpatial Relations:\n")
             for rel in caption.spatial_relations:
-                f.write(f"  • {rel}\n")
+                f.write(f"  > {rel}\n")
     
-    print(f"✅ Human-readable output saved to: {txt_file}")
+    print(f"Text output saved: {txt_file}")
     
     # Display results
     print("\n" + "="*60)
@@ -549,15 +454,15 @@ def main():
     
     print(f"\nObjects Detected ({len(caption.objects)}):")
     for obj in caption.objects[:5]:
-        print(f"  • {obj['label']}: pos({obj['center'][0]:.2f}, {obj['center'][1]:.2f}), "
+        print(f"  > {obj['label']}: pos({obj['center'][0]:.2f}, {obj['center'][1]:.2f}), "
               f"size={obj['size']}, conf={obj['confidence']:.2%}")
     
     if caption.spatial_relations:
         print("\nSpatial Relations:")
         for rel in caption.spatial_relations:
-            print(f"  • {rel}")
+            print(f"  > {rel}")
     
-    print(f"\n📸 Files created:")
+    print(f"\nFiles created:")
     print(f"  - {output_file} (JSON data)")
     print(f"  - {annotated_file} (Annotated image)")
     print(f"  - {txt_file} (Human-readable text)")
