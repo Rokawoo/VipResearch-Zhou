@@ -358,10 +358,11 @@ def main():
     print("Initializing VLA Caption Generator...")
     generator = VLACaptionGenerator()
     
-    # Process command line arguments or use example
+    # Process command line arguments
     if len(sys.argv) > 1:
         image_path = sys.argv[1]
         task_context = sys.argv[2] if len(sys.argv) > 2 else None
+        output_file = sys.argv[3] if len(sys.argv) > 3 else "caption_output.json"
     else:
         # Use example image
         import urllib.request
@@ -373,6 +374,7 @@ def main():
             urllib.request.urlretrieve(url, tmp.name)
             image_path = tmp.name
         task_context = "kitchen cleaning"
+        output_file = "caption_output.json"
         print(f"Using example image: {image_path}")
     
     # Generate caption
@@ -382,39 +384,55 @@ def main():
     
     caption = generator.generate_caption(image_path, task_context)
     
-    # Display results
+    # Save to JSON file
+    output_data = {
+        "image_path": image_path,
+        "task_context": task_context,
+        "caption": caption.to_dict(),
+        "training_format": caption.to_training_format(),
+        "hierarchical_format": caption.to_hierarchical_format()
+    }
+    
+    with open(output_file, 'w') as f:
+        json.dump(output_data, f, indent=2)
+    
+    print(f"\n✅ Caption saved to: {output_file}")
+    
+    # Also save human-readable format
+    txt_file = output_file.replace('.json', '.txt')
+    with open(txt_file, 'w') as f:
+        f.write("="*60 + "\n")
+        f.write("VLA CAPTION RESULTS\n")
+        f.write("="*60 + "\n\n")
+        f.write(f"Image: {image_path}\n")
+        f.write(f"Task Context: {task_context}\n\n")
+        f.write(f"Task Command: {caption.task_command}\n")
+        f.write(f"Subtask: {caption.subtask}\n")
+        f.write(f"Action: {caption.action_description}\n")
+        f.write(f"Scene: {caption.scene_type}\n")
+        f.write(f"Confidence: {caption.confidence:.2%}\n\n")
+        
+        f.write(f"Objects Detected ({len(caption.objects)}):\n")
+        for obj in caption.objects[:5]:
+            f.write(f"  • {obj['label']}: pos({obj['center'][0]:.2f}, {obj['center'][1]:.2f}), ")
+            f.write(f"size={obj['size']}, conf={obj['confidence']:.2%}\n")
+        
+        if caption.spatial_relations:
+            f.write("\nSpatial Relations:\n")
+            for rel in caption.spatial_relations:
+                f.write(f"  • {rel}\n")
+    
+    print(f"✅ Human-readable output saved to: {txt_file}")
+    
+    # Display results (optional - can comment out if you only want files)
     print("\n" + "="*60)
     print("VLA CAPTION RESULTS")
     print("="*60)
-    
-    print(f"\n Task Command: {caption.task_command}")
+    print(f"\nTask Command: {caption.task_command}")
     print(f"Subtask: {caption.subtask}")
     print(f"Action: {caption.action_description}")
     print(f"Scene: {caption.scene_type}")
     print(f"Confidence: {caption.confidence:.2%}")
-    
-    print(f"\n Objects Detected ({len(caption.objects)}):")
-    for obj in caption.objects[:5]:
-        print(f"  • {obj['label']}: pos({obj['center'][0]:.2f}, {obj['center'][1]:.2f}), "
-              f"size={obj['size']}, conf={obj['confidence']:.2%}")
-    
-    if caption.spatial_relations:
-        print(f"\n Spatial Relations:")
-        for rel in caption.spatial_relations:
-            print(f"  • {rel}")
-    
-    # Show training formats
-    print("\n" + "="*60)
-    print("TRAINING FORMATS")
-    print("="*60)
-    
-    print("\n1. Standard Training Format:")
-    print(json.dumps(caption.to_training_format(), indent=2))
-    
-    print("\n2. Hierarchical Format (π0.5 style):")
-    print(json.dumps(caption.to_hierarchical_format(), indent=2))
-    
-    print("\n✅ Caption generation complete!")
 
 
 if __name__ == "__main__":
