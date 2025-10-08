@@ -78,7 +78,7 @@ class VLACaptionGenerator:
         )
         self.caption_model = Blip2ForConditionalGeneration.from_pretrained(
             "Salesforce/blip2-opt-2.7b",
-            torch_dtype=torch.float16 if DEVICE == 'cuda' else torch.float32,
+            dtype=torch.float16 if DEVICE == 'cuda' else torch.float32,
             device_map="auto" if DEVICE == 'cuda' else None
         )
         if DEVICE == 'cpu':
@@ -197,7 +197,7 @@ class VLACaptionGenerator:
                  for k, v in inputs.items()}
         
         with torch.no_grad():
-            ids = self.caption_model.generate(**inputs, max_length=15, min_length=2)
+            ids = self.caption_model.generate(**inputs, max_new_tokens=15, min_new_tokens=2)
         
         response = self.caption_processor.batch_decode(ids, skip_special_tokens=True)[0]
         
@@ -222,7 +222,7 @@ class VLACaptionGenerator:
                  for k, v in inputs.items()}
         
         with torch.no_grad():
-            ids = self.caption_model.generate(**inputs, max_length=20, min_length=2)
+            ids = self.caption_model.generate(**inputs, max_new_tokens=20, min_new_tokens=2)
         
         response = self.caption_processor.batch_decode(ids, skip_special_tokens=True)[0]
         
@@ -307,7 +307,7 @@ class VLACaptionGenerator:
                  for k, v in inputs.items()}
         
         with torch.no_grad():
-            ids = self.caption_model.generate(**inputs, max_length=10, min_length=1)
+            ids = self.caption_model.generate(**inputs, max_new_tokens=10, min_new_tokens=1)
         
         scene = self.caption_processor.batch_decode(ids, skip_special_tokens=True)[0]
         scene = scene.strip().lower()
