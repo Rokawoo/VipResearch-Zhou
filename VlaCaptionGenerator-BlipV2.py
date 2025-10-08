@@ -179,36 +179,62 @@ class VLACaptionGenerator:
         return full_response.replace(prompt, "").strip()
     
     def _generate_task_command(self, image: Image.Image, context: Optional[str]) -> str:
-        """Generate high-level task"""
-        prompt = f"This is a {context} task. What should be done? Give one short command:" if context else \
-                 "What task should be performed here? Give one short command:"
-        
-        response = self._generate_with_prompt(image, prompt, 15, 2)
-        return response or "organize the scene"
-    
-    def _generate_subtask(self, image: Image.Image, objects: List[Dict], task: str) -> str:
-        """Generate current subtask"""
-        if not objects:
-            return "explore the scene"
-        
-        obj_list = ", ".join([obj["label"] for obj in objects[:3]])
-        prompt = f"Task: {task}. Objects: {obj_list}. Current subtask:"
+        """Generate high-level task with context-aware prompts"""
+        # Context-specific prompts for better identification
+        if context:
+            context_lower = context.lower()
+            if "ingredient" in context_lower or "food" in context_lower:
+                prompt = "What specific ingredients or food items are shown? Be precise:"
+            elif "identify" in context_lower or "recognize" in context_lower:
+                prompt = "Identify the specific objects in this image:"
+            elif "vegetable" in context_lower or "produce" in context_lower:
+                prompt = "What vegetables or produce items are visible? Name them specifically:"
+            elif "cook" in context_lower or "prep" in context_lower:
+                prompt = "What cooking ingredients need to be prepared? Be specific:"
+            else:
+                prompt = f"This is a {context} task. What should be done? Give one short command:"
+        else:
+            prompt = "What task should be performed here? Give one short command:"
         
         response = self._generate_with_prompt(image, prompt, 20, 2)
-        return response or f"pick up {objects[0]['label']}"
+        return response or "analyze the scene"
+    
+    def _generate_subtask(self, image: Image.Image, objects: List[Dict], task: str) -> str:
+        """Generate current subtask with better object awareness"""
+        if not objects:
+            # Ask BLIP-2 directly what's in the image
+            prompt = "What is the main object or item in this image? Be specific:"
+            item = self._generate_with_prompt(image, prompt, 15, 1)
+            return f"identify {item}" if item else "explore the scene"
+        
+        obj_list = ", ".join([obj["label"] for obj in objects[:3]])
+        
+        # If task involves identification, be more specific
+        if "identify" in task.lower() or "ingredient" in task.lower():
+            prompt = f"Looking at this image more carefully, what specific type of {obj_list} is this?"
+        else:
+            prompt = f"Task: {task}. Objects detected: {obj_list}. What specific action is needed?"
+        
+        response = self._generate_with_prompt(image, prompt, 20, 2)
+        return response or f"examine {objects[0]['label']}"
     
     def _generate_action(self, image: Image.Image, objects: List[Dict], subtask: str) -> str:
         """Generate low-level action with position using AI"""
         if not objects:
-            return "scan environment for objects"
+            # Try to get BLIP-2 to describe what it sees
+            prompt = "Describe the position of the main object in the image:"
+            description = self._generate_with_prompt(image, prompt, 25, 3)
+            return description or "scan environment for objects"
         
         # Find relevant object
         target_obj = next((obj for obj in objects if obj["label"].lower() in subtask.lower()), objects[0])
         
         x, y = target_obj["center"]
-        prompt = f"Robot task: {subtask}. Target: {target_obj['label']} at ({x:.2f}, {y:.2f}). Describe gripper action:"
         
-        action = self._generate_with_prompt(image, prompt, 25, 3)
+        # More descriptive action generation
+        prompt = f"For {subtask}, describe how to interact with the {target_obj['label']} at position ({x:.2f}, {y:.2f}):"
+        
+        action = self._generate_with_prompt(image, prompt, 30, 3)
         
         if not action:
             action = f"move gripper to {target_obj['label']} at position ({x:.2f}, {y:.2f})"
@@ -258,10 +284,10 @@ class VLACaptionGenerator:
         return None
     
     def _identify_scene(self, image: Image.Image) -> str:
-        """Identify scene type"""
-        prompt = "What room or scene is this? Answer in one word:"
-        scene = self._generate_with_prompt(image, prompt, 10, 1).lower()
-        return scene or "general"
+        """Identify scene type with more descriptive output"""
+        prompt = "Describe the main items visible in this image in 3-4 words:"
+        scene = self._generate_with_prompt(image, prompt, 15, 1).lower()
+        return scene or "general scene"
     
     def save_annotated_image(self, image_path: str, caption: VLACaption, output_path: str):
         """Save image with caption annotations overlay"""
@@ -307,7 +333,7 @@ class VLACaptionGenerator:
         # Create overlay for info panels
         overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
         overlay_draw = ImageDraw.Draw(overlay)
-        overlay_draw.rectangle([0, 0, 400, 120], fill=(0, 0, 0, 200))
+        overlay_draw.rectangle([0, 0, 450, 120], fill=(0, 0, 0, 200))
         
         # Top right spatial relations panel
         if caption.spatial_relations:
@@ -316,12 +342,12 @@ class VLACaptionGenerator:
         image = Image.alpha_composite(image.convert('RGBA'), overlay).convert('RGB')
         draw = ImageDraw.Draw(image)
         
-        # Draw info text (top left)
+        # Draw info text (top left) - adjusted for longer scene descriptions
         info_lines = [
-            f"Scene: {caption.scene_type}",
-            f"Task: {caption.task_command}",
-            f"Subtask: {caption.subtask}",
-            f"Action: {caption.action_description[:45]}...",
+            f"Scene: {caption.scene_type[:40]}",
+            f"Task: {caption.task_command[:40]}",
+            f"Subtask: {caption.subtask[:40]}",
+            f"Action: {caption.action_description[:40]}...",
             f"Confidence: {caption.confidence:.1%}",
             f"Objects: {len(caption.objects)}"
         ]
@@ -352,8 +378,8 @@ class VLACaptionGenerator:
             except Exception as e:
                 print(f"  Error: {e}")
         
-        with open(output_file, 'w') as f:
-            json.dump(results, f, indent=2)
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
         
         print(f"Saved {len(results)} captions to {output_file}")
         return results
@@ -419,18 +445,29 @@ def main():
     generator = VLACaptionGenerator()
     
     # Process command line arguments
-    if len(sys.argv) > 1:
-        image_path = sys.argv[1]
-        task_context = sys.argv[2] if len(sys.argv) > 2 else None
-        output_file = sys.argv[3] if len(sys.argv) > 3 else "caption_output.json"
-    else:
-        # Use example image - supports any image URL
-        print("\nDownloading example image...")
-        url = ""
-        image_path = download_image(url)
-        task_context = "kitchen cleaning"
-        output_file = "caption_output.json"
-        print(f"Using example image: {image_path}")
+    if len(sys.argv) < 2:
+        print("\nUsage:")
+        print("  python VlaCaptionGenerator.py <image_path_or_url> [task_context] [output_file]")
+        print("\nExamples:")
+        print('  python VlaCaptionGenerator.py image.jpg "ingredient identification"')
+        print('  python VlaCaptionGenerator.py https://example.com/garlic.jpg "identify vegetable"')
+        print("\nTask Context Suggestions:")
+        print("  - 'ingredient identification' - for identifying specific food items")
+        print("  - 'identify vegetable' - for vegetable recognition")
+        print("  - 'food preparation' - for cooking prep tasks")
+        print("  - 'recognize produce' - for produce identification")
+        print("  - 'identify object' - for general object identification")
+        sys.exit(1)
+    
+    image_path = sys.argv[1]
+    task_context = sys.argv[2] if len(sys.argv) > 2 else None
+    output_file = sys.argv[3] if len(sys.argv) > 3 else "caption_output.json"
+    
+    # Check if input is URL
+    if image_path.startswith(('http://', 'https://')):
+        print(f"Downloading image from: {image_path}")
+        image_path = download_image(image_path)
+        print(f"Downloaded to: {image_path}")
     
     # Generate caption
     print(f"\nGenerating caption for: {image_path}")
@@ -442,7 +479,7 @@ def main():
     # Save outputs
     output_base = os.path.splitext(output_file)[0]
     
-    # JSON output
+    # JSON output with UTF-8 encoding
     output_data = {
         "image_path": image_path,
         "task_context": task_context,
@@ -451,17 +488,17 @@ def main():
         "hierarchical_format": caption.to_hierarchical_format()
     }
     
-    with open(output_file, 'w') as f:
-        json.dump(output_data, f, indent=2)
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(output_data, f, indent=2, ensure_ascii=False)
     print(f"\nCaption saved: {output_file}")
     
     # Annotated image
     annotated_file = f"{output_base}_annotated.png"
     generator.save_annotated_image(image_path, caption, annotated_file)
     
-    # Text output
+    # Text output with UTF-8 encoding
     txt_file = f"{output_base}.txt"
-    with open(txt_file, 'w') as f:
+    with open(txt_file, 'w', encoding='utf-8') as f:
         f.write("="*60 + "\n")
         f.write("VLA CAPTION RESULTS\n")
         f.write("="*60 + "\n\n")
