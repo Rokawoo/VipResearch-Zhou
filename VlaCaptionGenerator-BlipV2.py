@@ -12,6 +12,11 @@ import json
 from dataclasses import dataclass, asdict
 import warnings
 import os
+import sys
+import urllib.request
+import tempfile
+from urllib.parse import urlparse
+
 warnings.filterwarnings('ignore')
 
 # Check for CUDA availability
@@ -145,25 +150,22 @@ class VLACaptionGenerator:
                 bbox[3] / image.height
             ]
             
-            obj = {
+            center = [(norm_bbox[0] + norm_bbox[2]) / 2, (norm_bbox[1] + norm_bbox[3]) / 2]
+            
+            objects.append({
                 "label": self.detector_model.config.id2label[label.item()],
                 "bbox": norm_bbox,
-                "center": [(norm_bbox[0] + norm_bbox[2]) / 2, (norm_bbox[1] + norm_bbox[3]) / 2],
+                "center": center,
                 "confidence": float(score.item()),
                 "size": self._get_size(norm_bbox)
-            }
-            objects.append(obj)
+            })
         
         return sorted(objects, key=lambda x: x['confidence'], reverse=True)[:10]
     
     def _get_size(self, bbox: List[float]) -> str:
         """Estimate object size from bbox"""
         area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
-        if area > 0.2:
-            return "large"
-        elif area > 0.05:
-            return "medium"
-        return "small"
+        return "large" if area > 0.2 else "medium" if area > 0.05 else "small"
     
     def _generate_with_prompt(self, image: Image.Image, prompt: str, max_tokens: int, min_tokens: int = 1) -> str:
         """Helper method to generate text with BLIP-2"""
@@ -182,7 +184,7 @@ class VLACaptionGenerator:
                  "What task should be performed here? Give one short command:"
         
         response = self._generate_with_prompt(image, prompt, 15, 2)
-        return response if response else "organize the scene"
+        return response or "organize the scene"
     
     def _generate_subtask(self, image: Image.Image, objects: List[Dict], task: str) -> str:
         """Generate current subtask"""
@@ -193,7 +195,7 @@ class VLACaptionGenerator:
         prompt = f"Task: {task}. Objects: {obj_list}. Current subtask:"
         
         response = self._generate_with_prompt(image, prompt, 20, 2)
-        return response if response else f"pick up {objects[0]['label']}"
+        return response or f"pick up {objects[0]['label']}"
     
     def _generate_action(self, image: Image.Image, objects: List[Dict], subtask: str) -> str:
         """Generate low-level action with position using AI"""
@@ -210,10 +212,9 @@ class VLACaptionGenerator:
         
         if not action:
             action = f"move gripper to {target_obj['label']} at position ({x:.2f}, {y:.2f})"
-            if target_obj["size"] == "small":
-                action += " with precision grip"
-            elif target_obj["size"] == "large":
-                action += " with wide grip"
+            grip_type = " with precision grip" if target_obj["size"] == "small" else \
+                       " with wide grip" if target_obj["size"] == "large" else ""
+            action += grip_type
         
         return action
     
@@ -226,29 +227,31 @@ class VLACaptionGenerator:
                 rel = self._compute_relation(obj1, obj2)
                 if rel:
                     relations.append(rel)
+                if len(relations) >= 5:
+                    return relations
         
-        return relations[:5]
+        return relations
     
     def _compute_relation(self, obj1: Dict, obj2: Dict) -> Optional[str]:
         """Compute spatial relation between two objects"""
         c1, c2 = obj1["center"], obj2["center"]
         dx, dy = c2[0] - c1[0], c2[1] - c1[1]
         
-        # Vertical relations
+        # Check vertical relations
         if abs(dx) < 0.1:
             if dy > 0.1:
                 return f"{obj1['label']} above {obj2['label']}"
             elif dy < -0.1:
                 return f"{obj1['label']} below {obj2['label']}"
         
-        # Horizontal relations
+        # Check horizontal relations
         if abs(dy) < 0.1:
             if dx > 0.1:
                 return f"{obj1['label']} left of {obj2['label']}"
             elif dx < -0.1:
                 return f"{obj1['label']} right of {obj2['label']}"
         
-        # Proximity
+        # Check proximity
         if np.sqrt(dx**2 + dy**2) < 0.15:
             return f"{obj1['label']} near {obj2['label']}"
         
@@ -258,14 +261,14 @@ class VLACaptionGenerator:
         """Identify scene type"""
         prompt = "What room or scene is this? Answer in one word:"
         scene = self._generate_with_prompt(image, prompt, 10, 1).lower()
-        return scene if scene else "general"
+        return scene or "general"
     
     def save_annotated_image(self, image_path: str, caption: VLACaption, output_path: str):
         """Save image with caption annotations overlay"""
         image = Image.open(image_path).convert('RGB')
         draw = ImageDraw.Draw(image)
         
-        # Color based on confidence
+        # Color mapping based on confidence
         get_color = lambda conf: (0, 255, 0) if conf > 0.8 else (255, 255, 0) if conf > 0.6 else (255, 0, 0)
         
         # Load fonts
@@ -278,17 +281,14 @@ class VLACaptionGenerator:
         # Draw bounding boxes and labels
         for obj in caption.objects[:10]:
             bbox = obj["bbox"]
-            x1 = int(bbox[0] * image.width)
-            y1 = int(bbox[1] * image.height)
-            x2 = int(bbox[2] * image.width)
-            y2 = int(bbox[3] * image.height)
+            x1, y1 = int(bbox[0] * image.width), int(bbox[1] * image.height)
+            x2, y2 = int(bbox[2] * image.width), int(bbox[3] * image.height)
+            cx_px, cy_px = int(obj["center"][0] * image.width), int(obj["center"][1] * image.height)
             
             color = get_color(obj["confidence"])
             
             # Draw rectangle and center point
             draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
-            cx_px = int(obj["center"][0] * image.width)
-            cy_px = int(obj["center"][1] * image.height)
             draw.ellipse([cx_px-5, cy_px-5, cx_px+5, cy_px+5], fill=color, outline=(255, 255, 255))
             
             # Draw label with background
@@ -304,7 +304,7 @@ class VLACaptionGenerator:
             draw.text((cx_px+10, cy_px), f"({obj['center'][0]:.2f}, {obj['center'][1]:.2f})", 
                      fill=(255, 255, 255), font=font_small)
         
-        # Top left info panel with background
+        # Create overlay for info panels
         overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
         overlay_draw = ImageDraw.Draw(overlay)
         overlay_draw.rectangle([0, 0, 400, 120], fill=(0, 0, 0, 200))
@@ -326,18 +326,14 @@ class VLACaptionGenerator:
             f"Objects: {len(caption.objects)}"
         ]
         
-        y_offset = 10
-        for line in info_lines:
-            draw.text((10, y_offset), line, fill=(255, 255, 255), font=font)
-            y_offset += 18
+        for i, line in enumerate(info_lines):
+            draw.text((10, 10 + i * 18), line, fill=(255, 255, 255), font=font)
         
         # Draw spatial relations (top right)
         if caption.spatial_relations:
             draw.text((image.width-240, 10), "Spatial Relations:", fill=(255, 255, 0), font=font)
-            y_offset = 30
-            for rel in caption.spatial_relations[:4]:
-                draw.text((image.width-240, y_offset), f"> {rel}", fill=(200, 200, 200), font=font_small)
-                y_offset += 15
+            for i, rel in enumerate(caption.spatial_relations[:4]):
+                draw.text((image.width-240, 30 + i * 15), f"> {rel}", fill=(200, 200, 200), font=font_small)
         
         image.save(output_path, 'PNG')
         print(f"Annotated image saved: {output_path}")
@@ -363,12 +359,61 @@ class VLACaptionGenerator:
         return results
 
 
+def download_image(url: str) -> str:
+    """Download image from URL and return local path, supports multiple formats"""
+    # Extension mapping
+    ext_map = {
+        '.jpg': ['.jpg', '.jpeg'],
+        '.png': ['.png'],
+        '.webp': ['.webp'],
+        '.gif': ['.gif'],
+        '.bmp': ['.bmp']
+    }
+    
+    # Determine extension from URL
+    url_lower = url.lower()
+    ext = '.jpg'  # default
+    
+    for extension, patterns in ext_map.items():
+        if any(pattern in url_lower for pattern in patterns):
+            ext = extension
+            break
+    
+    # If no extension found in URL, try content-type
+    if ext == '.jpg' and not any(p in url_lower for patterns in ext_map.values() for p in patterns):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req) as response:
+                content_type = response.headers.get('Content-Type', '').lower()
+                
+                type_map = {
+                    'jpeg': '.jpg', 'jpg': '.jpg',
+                    'png': '.png', 'webp': '.webp',
+                    'gif': '.gif', 'bmp': '.bmp'
+                }
+                
+                for key, val in type_map.items():
+                    if key in content_type:
+                        ext = val
+                        break
+                
+                # Download the content
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                    tmp.write(response.read())
+                    return tmp.name
+        except:
+            pass
+    
+    # Standard download
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req) as response:
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(response.read())
+            return tmp.name
+
+
 def main():
     """Example usage and test"""
-    import sys
-    import urllib.request
-    import tempfile
-    
     # Initialize generator
     print("Initializing VLA Caption Generator...")
     generator = VLACaptionGenerator()
@@ -379,12 +424,10 @@ def main():
         task_context = sys.argv[2] if len(sys.argv) > 2 else None
         output_file = sys.argv[3] if len(sys.argv) > 3 else "caption_output.json"
     else:
-        # Use example image
+        # Use example image - supports any image URL
         print("\nDownloading example image...")
-        url = "https://www.gardeningchores.com/wp-content/uploads/2021/01/Rocambole-Hardneck-garlic-768x528.jpg"
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-            urllib.request.urlretrieve(url, tmp.name)
-            image_path = tmp.name
+        url = ""
+        image_path = download_image(url)
         task_context = "kitchen cleaning"
         output_file = "caption_output.json"
         print(f"Using example image: {image_path}")
