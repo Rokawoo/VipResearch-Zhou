@@ -43,7 +43,7 @@ conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvi
 conda install pytorch torchvision torchaudio cpuonly -c pytorch
 
 # Install dependencies
-pip install transformers==4.36.2 pillow==10.2.0 numpy==1.24.3 accelerate==0.25.0 sentencepiece==0.1.99
+pip install transformers==4.36.2 pillow==10.2.0 numpy==1.24.3 accelerate==0.25.0 sentencepiece==0.1.99 transformers accelerate hf_xet timm
 ```
 
 ### Usage
