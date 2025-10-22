@@ -1,0 +1,8 @@
+# configs/garlic_dataset.yaml
+path: ../dataset
+train: images/train
+val: images/val
+
+nc: 1  # number of classes
+names:
+  0: garlic_bulb
