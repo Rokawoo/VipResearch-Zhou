@@ -1,6 +1,10 @@
 # Data
+
 dataset/
+results/
 runs/
+yolo11*
+
 
 # Outputs
 *.json
