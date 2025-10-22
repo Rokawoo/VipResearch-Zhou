@@ -1,6 +1,6 @@
 # Create conda environment
-conda create -n garlic_detector python=3.10 -y
-conda activate garlic_detector
+conda create -n garlic-seg python=3.10 -y
+conda activate garlic-seg
 
 # Install PyTorch with CUDA (Fill in XXX)
 pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cuXXX
