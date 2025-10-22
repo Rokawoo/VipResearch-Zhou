@@ -1,6 +1,7 @@
 # Data
 
-dataset/
+#dataset/
+raw/
 results/
 runs/
 yolo11*
@@ -8,7 +9,6 @@ yolo11*
 
 # Outputs
 *.json
-*.txt
 *.png
 
 # Byte-compiled / optimized / DLL files
