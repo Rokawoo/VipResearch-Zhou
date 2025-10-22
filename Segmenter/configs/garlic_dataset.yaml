@@ -1,8 +1,13 @@
-# configs/garlic_dataset.yaml
+# Path to dataset (relative to where you run the script)
 path: ../dataset
-train: images/train
-val: images/val
 
-nc: 1  # number of classes
+# Paths to train and val images
+train: ../images/train
+val: ../images/val
+
+# Number of classes
+nc: 1
+
+# Class names
 names:
-  0: garlic_bulb
+  0: garlic
