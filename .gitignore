@@ -1,8 +1,9 @@
 # Data
 caption_output.txt
 
-#dataset/
-raw/
+dataset/
+#images/
+#raw/
 results/
 runs/
 yolo11*
