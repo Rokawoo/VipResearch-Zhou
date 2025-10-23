@@ -15,13 +15,13 @@ def train():
     # Train
     results = model.train(
         data='../configs/garlic_dataset.yaml',  # Path to your config
-        epochs=100,                          # Start with 100
+        epochs=1000,                          # Start with 100
         imgsz=640,                           # Image size
         batch=-1,                            # Auto batch for RTX 5090
         device=0,                            # GPU 0
         amp=True,                            # Mixed precision
         project='runs',                      # Where to save
-        name='garlic_exp1',                  # Experiment name
+        name='garlic_seg',                  # Experiment name
         patience=20,                         # Early stopping
         save=True,
         save_period=10,                      # Save every 10 epochs
@@ -31,7 +31,7 @@ def train():
     )
 
     print("Training complete!")
-    print(f"Best model saved at: runs/garlic_exp1/weights/best.pt")
+    print(f"Best model saved at: runs/garlic_seg/weights/best.pt")
 
 if __name__ == '__main__':
     train()
