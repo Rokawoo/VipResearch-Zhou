@@ -36,6 +36,10 @@ python -c "from ultralytics import YOLO; model = YOLO('yolo11n.pt'); print('YOLO
 python -c "import cv2; print(f'OpenCV: {cv2.__version__}')"
 ```
 
+# Label Images
+pip install label-studio
+label-studio start
+
 ## Requirements
 - Windows 10/11
 - NVIDIA GPU with CUDA 12.4+ support
