@@ -42,7 +42,7 @@ def train():
         data=data_yaml,
         
         # Training duration
-        epochs=500,
+        epochs=1000,
         patience=75,
         
         # Image settings
