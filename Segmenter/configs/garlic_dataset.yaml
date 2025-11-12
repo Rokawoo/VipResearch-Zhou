@@ -6,8 +6,10 @@ train: ../images/train
 val: ../images/val
 
 # Number of classes
-nc: 1
+nc: 3
 
 # Class names
 names:
-  0: garlic
+  0: Garlic Bulb
+  1: Garlic Root
+  2: Gripper
