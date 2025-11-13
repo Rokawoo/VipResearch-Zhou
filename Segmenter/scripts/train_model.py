@@ -107,7 +107,7 @@ def train():
     print("TRAINING COMPLETE")
     print("="*60)
     
-    best_model_path = 'runs/garlic/final/weights/best.pt'
+    best_model_path = 'runs/garlic_seg/final/weights/best.pt'
     print(f"\nBest model: {best_model_path}")
     
     # Load best model and validate
@@ -146,7 +146,7 @@ def train():
     print("\n" + "="*60)
     print("NEXT STEPS")
     print("="*60)
-    print("1. Review training plots: runs/garlic/final/")
+    print("1. Review training plots: runs/garlic_seg/final/")
     print("2. Test on new images:")
     print("   from ultralytics import YOLO")
     print(f"   model = YOLO('{best_model_path}')")

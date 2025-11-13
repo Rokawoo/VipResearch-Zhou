@@ -4,7 +4,7 @@ import numpy as np
 from ultralytics import YOLO
 import sys
 
-def detect_and_draw_polygons(image_path, model_path='../runs/garlic_seg/weights/best.pt'):
+def detect_and_draw_polygons(image_path, model_path='./runs/garlic_seg/final/weights/best.pt'):
     # Load model
     model = YOLO(model_path)
     
