@@ -59,9 +59,10 @@ TRACKING_IOU_THRESHOLD = 0.15        # Minimum IoU to consider same garlic
 TRACKING_CENTROID_MAX_DIST = 150     # Max centroid movement (pixels) per frame
 TRACKING_LOST_FRAMES = 10            # Frames without match before considered lost
 
-# Selection weights - HEAVILY favor size and gripper proximity
-SELECTION_AREA_WEIGHT = 0.7          # Weight for area (bigger = better)
-SELECTION_GRIPPER_WEIGHT = 0.3       # Weight for proximity to gripper
+# Selection weights - prioritize bottom of screen, then size, then confidence
+SELECTION_BOTTOM_WEIGHT = 0.5        # Weight for closeness to bottom of screen (higher Y = better)
+SELECTION_AREA_WEIGHT = 0.35         # Weight for area (bigger = better)
+SELECTION_CONF_WEIGHT = 0.15         # Weight for confidence (minor tiebreaker)
 
 
 class TrackingState(Enum):
@@ -108,8 +109,9 @@ class GarlicTracker:
     Selects ONE garlic based on: biggest area + closest to gripper.
     """
     
-    def __init__(self, fps: int = 30):
+    def __init__(self, fps: int = 30, frame_height: int = 1080):
         self.fps = fps
+        self.frame_height = frame_height
         self.state = TrackingState.WAITING
         self.tracked: Optional[TrackedGarlic] = None
         
@@ -125,9 +127,6 @@ class GarlicTracker:
         self.candidates_seen: List[GarlicCandidate] = []
         self.best_candidate: Optional[GarlicCandidate] = None
         
-        # Gripper positions for proximity calculation
-        self.gripper_centroids: List[Tuple[int, int]] = []
-        
     def reset(self):
         """Reset tracker to initial state"""
         self.state = TrackingState.WAITING
@@ -136,7 +135,6 @@ class GarlicTracker:
         self.frames_gathering = 0
         self.candidates_seen = []
         self.best_candidate = None
-        self.gripper_centroids = []
         
     def compute_iou(self, mask1: np.ndarray, mask2: np.ndarray) -> float:
         """Compute Intersection over Union between two masks"""
@@ -147,17 +145,6 @@ class GarlicTracker:
     def compute_centroid_dist(self, c1: Tuple[int, int], c2: Tuple[int, int]) -> float:
         """Compute Euclidean distance between centroids"""
         return np.sqrt((c1[0] - c2[0])**2 + (c1[1] - c2[1])**2)
-    
-    def compute_gripper_distance(self, centroid: Tuple[int, int]) -> float:
-        """Compute minimum distance to any gripper"""
-        if not self.gripper_centroids:
-            return float('inf')
-        
-        min_dist = float('inf')
-        for gc in self.gripper_centroids:
-            dist = self.compute_centroid_dist(centroid, gc)
-            min_dist = min(min_dist, dist)
-        return min_dist
     
     def find_best_match(self, candidates: List[GarlicCandidate]) -> Optional[GarlicCandidate]:
         """Find the candidate that best matches the currently tracked garlic."""
@@ -181,39 +168,42 @@ class GarlicTracker:
         
         return best_match
     
-    def select_best_candidate(self) -> Optional[GarlicCandidate]:
+    def select_best_candidate(self, frame_height: int) -> Optional[GarlicCandidate]:
         """
         Select the ONE best garlic from gathered candidates.
-        Priority: Biggest area + closest to gripper.
+        Priority: 
+          1. Closest to bottom of screen (higher Y = closer to camera)
+          2. Biggest area
+          3. Highest confidence (minor tiebreaker)
         """
         if not self.candidates_seen:
             return None
         
-        # Find max area for normalization
+        # Find max values for normalization
         max_area = max(c.area for c in self.candidates_seen)
-        
-        # Find max gripper distance for normalization (to invert: closer = higher score)
-        gripper_dists = [self.compute_gripper_distance(c.centroid) for c in self.candidates_seen]
-        max_gripper_dist = max(gripper_dists) if gripper_dists else 1
-        if max_gripper_dist == 0:
-            max_gripper_dist = 1
+        max_y = max(c.centroid[1] for c in self.candidates_seen)
+        min_y = min(c.centroid[1] for c in self.candidates_seen)
+        y_range = max_y - min_y if max_y != min_y else 1
         
         # Score all candidates
         best = None
         best_score = -1
         
-        for i, candidate in enumerate(self.candidates_seen):
+        for candidate in self.candidates_seen:
+            # Normalize Y position (0-1, higher Y = higher score = closer to bottom)
+            # Use centroid Y relative to frame height for absolute positioning
+            bottom_score = candidate.centroid[1] / frame_height
+            
             # Normalize area (0-1, bigger = higher)
             area_score = candidate.area / max_area if max_area > 0 else 0
             
-            # Normalize gripper proximity (0-1, closer = higher)
-            if gripper_dists[i] == float('inf'):
-                gripper_score = 0.5  # Neutral if no grippers
-            else:
-                gripper_score = 1 - (gripper_dists[i] / max_gripper_dist)
+            # Confidence is already 0-1
+            conf_score = candidate.confidence
             
-            # Combined score - heavily weight area
-            score = SELECTION_AREA_WEIGHT * area_score + SELECTION_GRIPPER_WEIGHT * gripper_score
+            # Combined score
+            score = (SELECTION_BOTTOM_WEIGHT * bottom_score + 
+                    SELECTION_AREA_WEIGHT * area_score + 
+                    SELECTION_CONF_WEIGHT * conf_score)
             
             if score > best_score:
                 best_score = score
@@ -223,20 +213,17 @@ class GarlicTracker:
     
     def update(
         self, 
-        candidates: List[GarlicCandidate],
-        gripper_centroids: List[Tuple[int, int]]
+        candidates: List[GarlicCandidate]
     ) -> Tuple[TrackingState, Optional[TrackedGarlic]]:
         """
         Update tracker with new frame's detections.
         """
-        self.gripper_centroids = gripper_centroids
-        
         if self.state == TrackingState.WAITING:
             if candidates:
                 self.state = TrackingState.GATHERING
                 self.frames_gathering = 0
                 self.candidates_seen = candidates.copy()
-                self.best_candidate = self.select_best_candidate()
+                self.best_candidate = self.select_best_candidate(self.frame_height)
             else:
                 self.frames_waiting += 1
                 
@@ -254,7 +241,7 @@ class GarlicTracker:
                     if is_new:
                         self.candidates_seen.append(c)
                 
-                self.best_candidate = self.select_best_candidate()
+                self.best_candidate = self.select_best_candidate(self.frame_height)
             
             self.frames_gathering += 1
             
@@ -594,7 +581,6 @@ def process_frame_with_tracking(
     
     root_centroids = []
     gripper_data = []
-    gripper_centroids = []
     
     if results and results[0].masks is not None:
         result = results[0]
@@ -630,16 +616,14 @@ def process_frame_with_tracking(
                 root_centroids.append(centroid)
             elif cls == CLASS_GRIPPER:
                 gripper_data.append({'contour': main_contour, 'centroid': centroid})
-                if centroid:
-                    gripper_centroids.append(centroid)
         
         # Extract garlic candidates
         candidates = extract_garlic_candidates(frame, masks, boxes, classes, root_centroids)
     else:
         candidates = []
     
-    # Update tracker with gripper positions
-    state, tracked = tracker.update(candidates, gripper_centroids)
+    # Update tracker
+    state, tracked = tracker.update(candidates)
     
     # Draw all garlic bulbs (dimmed if not tracked)
     width_points_to_draw = []
@@ -889,7 +873,7 @@ def process_video(
         cap.release()
         return None
     
-    tracker = GarlicTracker(fps=fps) if enable_tracking else None
+    tracker = GarlicTracker(fps=fps, frame_height=height) if enable_tracking else None
     
     print(f"\n🎬 Processing video...")
     print(f"   🟣 Width points: {'ENABLED' if draw_width_points else 'DISABLED'}")
@@ -986,8 +970,9 @@ def process_video_with_preview(
         return
     
     fps = int(cap.get(cv2.CAP_PROP_FPS))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
-    tracker = GarlicTracker(fps=fps)
+    tracker = GarlicTracker(fps=fps, frame_height=frame_height)
     
     print(f"\n📹 Playing at {fps} FPS")
     print("   q = quit")
@@ -1099,6 +1084,9 @@ if __name__ == "__main__":
         print("="*60)
         print(f"  1. Wait {TRACKING_WAIT_INITIAL_SEC}s for garlic to appear")
         print(f"  2. Gather candidates for {TRACKING_GATHER_SEC}s")
-        print(f"  3. Select ONE garlic: biggest ({SELECTION_AREA_WEIGHT*100:.0f}%) + closest to gripper ({SELECTION_GRIPPER_WEIGHT*100:.0f}%)")
+        print(f"  3. Select ONE garlic:")
+        print(f"     - Closest to bottom ({SELECTION_BOTTOM_WEIGHT*100:.0f}%)")
+        print(f"     - Biggest size ({SELECTION_AREA_WEIGHT*100:.0f}%)")
+        print(f"     - Highest confidence ({SELECTION_CONF_WEIGHT*100:.0f}%)")
         print("  4. Track until lost, then repeat")
         print("="*60)
