@@ -88,7 +88,7 @@ def train():
         amp=True,
         
         # Saving
-        project='runs/garlic',
+        project='runs/garlic_seg',
         name='final',
         exist_ok=True,
         save=True,
