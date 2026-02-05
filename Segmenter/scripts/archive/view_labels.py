@@ -1,9 +1,10 @@
 import cv2
 from pathlib import Path
 import numpy as np
+import sys
 
 # -------- CONFIGURATION --------
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).parent
 IMAGES_DIR = BASE_DIR / "images"
 LABELS_DIR = BASE_DIR / "labels"
 IMG_EXTENSIONS = [".jpg", ".jpeg", ".png"]
