@@ -1,19 +1,26 @@
 """
-Garlic Video Segmentation
-=========================
+Garlic Segmentation
+===================
 
-Detects and highlights garlic bulbs in video footage using YOLO segmentation.
+Detects and highlights garlic bulbs in video footage or image folders
+using YOLO segmentation.
 
 Colors:
     Blue = Garlic (right-side up)
     Red  = Garlic with root visible (upside-down)
 
 Pipeline:
-    1. Run YOLO segmentation on each frame
+    1. Run YOLO segmentation on each frame/image
     2. Validate detections (size, shape, confidence)
-    3. Track detections across frames by centroid proximity
-    4. After confirmation period, draw contours for stable tracks
+    3. Track detections across frames by centroid proximity (video only)
+    4. After confirmation period, draw contours for stable tracks (video only)
     5. Check if root centroid is inside bulb to determine orientation
+
+Usage:
+    python detect_video.py <video>              Process video and save
+    python detect_video.py <video> --preview    Live preview
+    python detect_video.py <video> -o <out>     Custom output path
+    python detect_video.py <folder>             Process all images in folder
 """
 
 import cv2
@@ -53,7 +60,7 @@ OVERLAY_ALPHA = 0.3            # Transparency for filled regions
 # DETECTION THRESHOLDS
 # =============================================================================
 
-CONFIDENCE_THRESHOLD = 0.70    # Minimum YOLO confidence to consider detection
+CONFIDENCE_THRESHOLD = 0.40    # Minimum YOLO confidence to consider detection
 
 
 # =============================================================================
@@ -82,6 +89,13 @@ MIN_SOLIDITY = 0.5       # Contour area / convex hull area - filters jagged shap
 MIN_VISIBLE_SECONDS = 0.5  # How long before confirming a track
 MAX_MISSING_SECONDS = 0.33 # How long before dropping a lost track
 MAX_MATCH_DISTANCE = 100   # Max pixels between frames to consider same object
+
+
+# =============================================================================
+# IMAGE EXTENSIONS
+# =============================================================================
+
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp'}
 
 
 # =============================================================================
@@ -454,49 +468,101 @@ class GarlicSegmenter:
             conf=CONFIDENCE_THRESHOLD,
             verbose=False
         )[0]
-
+        
         # Extract and validate detections
         bulb_detections, root_detections = self._extract_detections(result, frame.shape)
-
+        
         # Update tracking for both classes
         bulb_results = self._update_tracks(self.bulb_tracks, bulb_detections)
         root_results = self._update_tracks(self.root_tracks, root_detections)
-
+        
         # Get centroids of confirmed roots (for orientation check)
         confirmed_root_centroids = [
             det['centroid'] for det, confirmed in root_results if confirmed
         ]
-
+        
         # Draw annotations
         output = frame.copy()
         overlay = frame.copy()
-
+        
+        # Draw bulbs
         for detection, is_confirmed in bulb_results:
             if not is_confirmed:
                 continue
-
+            
             contour = detection['contour']
-
+            
+            # Check if any confirmed root centroid is inside this bulb
             has_visible_root = any(
                 point_inside_contour(root_centroid, contour)
                 for root_centroid in confirmed_root_centroids
             )
-
+            
             color = COLOR_INVERTED if has_visible_root else COLOR_UPRIGHT
-
+            
             cv2.fillPoly(overlay, [contour], color)
             cv2.drawContours(output, [contour], -1, color, 2)
-
-        # ---- NEW: Draw confirmed root detections ----
+        
+        # Draw roots
         for detection, is_confirmed in root_results:
             if not is_confirmed:
                 continue
-
+            
             contour = detection['contour']
             cv2.fillPoly(overlay, [contour], COLOR_INVERTED)
             cv2.drawContours(output, [contour], -1, COLOR_INVERTED, 2)
-
+        
         # Blend overlay with output
+        return cv2.addWeighted(output, 1.0, overlay, OVERLAY_ALPHA, 0)
+    
+    def process_image(self, image):
+        """
+        Process a single image and return annotated output.
+        
+        Unlike process_frame, this skips tracking entirely — every valid
+        detection is drawn immediately since there's no temporal context.
+        
+        Args:
+            image: BGR image (numpy array)
+        
+        Returns:
+            Annotated image with garlic highlighted
+        """
+        result = self.model.predict(
+            image,
+            retina_masks=True,
+            conf=CONFIDENCE_THRESHOLD,
+            verbose=False
+        )[0]
+        
+        bulb_detections, root_detections = self._extract_detections(result, image.shape)
+        
+        # Collect root centroids for orientation check
+        root_centroids = [det['centroid'] for det in root_detections]
+        
+        output = image.copy()
+        overlay = image.copy()
+        
+        # Draw bulbs
+        for detection in bulb_detections:
+            contour = detection['contour']
+            
+            has_visible_root = any(
+                point_inside_contour(rc, contour)
+                for rc in root_centroids
+            )
+            
+            color = COLOR_INVERTED if has_visible_root else COLOR_UPRIGHT
+            
+            cv2.fillPoly(overlay, [contour], color)
+            cv2.drawContours(output, [contour], -1, color, 2)
+        
+        # Draw roots
+        for detection in root_detections:
+            contour = detection['contour']
+            cv2.fillPoly(overlay, [contour], COLOR_INVERTED)
+            cv2.drawContours(output, [contour], -1, COLOR_INVERTED, 2)
+        
         return cv2.addWeighted(output, 1.0, overlay, OVERLAY_ALPHA, 0)
     
     def reset(self):
@@ -663,34 +729,109 @@ def preview_video(video_path, model_path=None):
 
 
 # =============================================================================
+# IMAGE FOLDER PROCESSING
+# =============================================================================
+
+def process_folder(folder_path, model_path=None):
+    """
+    Process all images in a folder and save annotated results alongside originals.
+    
+    Output files are saved in the same folder with a 'segmented_' prefix.
+    
+    Args:
+        folder_path: Folder containing images
+        model_path: YOLO model weights (uses default if None)
+    """
+    folder_path = Path(folder_path)
+    model_path = Path(model_path) if model_path else DEFAULT_MODEL
+    
+    if not folder_path.is_dir():
+        print(f"❌ Folder not found: {folder_path}")
+        return
+    if not model_path.exists():
+        print(f"❌ Model not found: {model_path}")
+        return
+    
+    # Find all images
+    image_files = sorted(
+        f for f in folder_path.iterdir()
+        if f.suffix.lower() in IMAGE_EXTENSIONS
+        and f.is_file()
+        and not f.name.startswith('segmented_')  # skip previous outputs
+    )
+    
+    if not image_files:
+        print(f"❌ No images found in {folder_path}")
+        return
+    
+    print("=" * 60)
+    print("Garlic Image Segmentation")
+    print("=" * 60)
+    print(f"Folder: {folder_path}")
+    print(f"Model:  {model_path}")
+    print(f"Images: {len(image_files)}")
+    print("=" * 60)
+    
+    segmenter = GarlicSegmenter(model_path)
+    processed = 0
+    errors = 0
+    
+    for img_path in tqdm(image_files, desc="Processing"):
+        img = cv2.imread(str(img_path))
+        if img is None:
+            print(f"  [WARN] Could not read: {img_path.name}")
+            errors += 1
+            continue
+        
+        output = segmenter.process_image(img)
+        
+        out_path = folder_path / f"segmented_{img_path.name}"
+        cv2.imwrite(str(out_path), output)
+        processed += 1
+        
+        # Reset stats per image for clean counting
+        segmenter.stats = {
+            'total_detections': 0,
+            'rejected_detections': 0,
+            'rejection_reasons': {}
+        }
+    
+    print("=" * 60)
+    print(f"✅ Done: {processed} images processed, {errors} errors")
+    print(f"   Output in: {folder_path}")
+    print("=" * 60)
+
+
+# =============================================================================
 # CLI ENTRY POINT
 # =============================================================================
 
 def print_help():
     """Print usage information."""
     print("""
-Garlic Video Segmentation
-=========================
+Garlic Segmentation
+===================
 
-Detects garlic bulbs in video and highlights their orientation.
+Detects garlic bulbs in video or images and highlights their orientation.
   Blue = right-side up (bulb only visible)
   Red  = upside-down (root visible)
 
 Usage:
-  python detect_video.py <video>              Process and save
+  python detect_video.py <video>              Process video and save
   python detect_video.py <video> --preview    Live preview
   python detect_video.py <video> -o <out>     Custom output path
+  python detect_video.py <folder>             Process all images in folder
 
 Configuration:
   Model:      {model}
   Confidence: > {conf:.0f}%
-  Confirm:    {confirm}s visible before drawing
+  Confirm:    {confirm}s visible before drawing (video only)
   Min size:   {min_pct:.1f}% of frame or {min_px}px
   Max size:   {max_pct:.0f}% of frame
 
 The tracking system filters out noise by requiring detections to
-persist for {confirm}s before displaying them. Detections that are
-too small, too large, or have unusual shapes are also filtered out.
+persist for {confirm}s before displaying them (video mode only).
+Image mode draws all valid detections immediately.
 """.format(
         model=DEFAULT_MODEL,
         conf=CONFIDENCE_THRESHOLD * 100,
@@ -706,15 +847,18 @@ if __name__ == "__main__":
         print_help()
         sys.exit(1)
     
-    video = sys.argv[1]
+    target = Path(sys.argv[1])
     
-    if "--preview" in sys.argv:
-        preview_video(video)
+    if target.is_dir():
+        # Folder of images
+        process_folder(target)
+    elif "--preview" in sys.argv:
+        preview_video(target)
     elif "-o" in sys.argv:
         idx = sys.argv.index("-o")
         if idx + 1 >= len(sys.argv):
             print("❌ Error: -o requires an output path")
             sys.exit(1)
-        process_video(video, output_path=sys.argv[idx + 1])
+        process_video(target, output_path=sys.argv[idx + 1])
     else:
-        process_video(video)
+        process_video(target)
