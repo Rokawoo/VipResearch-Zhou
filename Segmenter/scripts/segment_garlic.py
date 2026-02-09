@@ -454,44 +454,48 @@ class GarlicSegmenter:
             conf=CONFIDENCE_THRESHOLD,
             verbose=False
         )[0]
-        
+
         # Extract and validate detections
         bulb_detections, root_detections = self._extract_detections(result, frame.shape)
-        
+
         # Update tracking for both classes
         bulb_results = self._update_tracks(self.bulb_tracks, bulb_detections)
         root_results = self._update_tracks(self.root_tracks, root_detections)
-        
+
         # Get centroids of confirmed roots (for orientation check)
         confirmed_root_centroids = [
             det['centroid'] for det, confirmed in root_results if confirmed
         ]
-        
+
         # Draw annotations
         output = frame.copy()
         overlay = frame.copy()
-        
+
         for detection, is_confirmed in bulb_results:
             if not is_confirmed:
-                continue  # Skip unconfirmed detections
-            
+                continue
+
             contour = detection['contour']
-            
-            # Check if any confirmed root centroid is inside this bulb
+
             has_visible_root = any(
                 point_inside_contour(root_centroid, contour)
                 for root_centroid in confirmed_root_centroids
             )
-            
-            # Color based on orientation
+
             color = COLOR_INVERTED if has_visible_root else COLOR_UPRIGHT
-            
-            # Draw filled region on overlay
+
             cv2.fillPoly(overlay, [contour], color)
-            
-            # Draw outline on output
             cv2.drawContours(output, [contour], -1, color, 2)
-        
+
+        # ---- NEW: Draw confirmed root detections ----
+        for detection, is_confirmed in root_results:
+            if not is_confirmed:
+                continue
+
+            contour = detection['contour']
+            cv2.fillPoly(overlay, [contour], COLOR_INVERTED)
+            cv2.drawContours(output, [contour], -1, COLOR_INVERTED, 2)
+
         # Blend overlay with output
         return cv2.addWeighted(output, 1.0, overlay, OVERLAY_ALPHA, 0)
     
