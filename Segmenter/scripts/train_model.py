@@ -5,9 +5,9 @@ import os
 def train():
     """
     Optimal training configuration for:
-    - 80 images, ~640 instances (6-7 labels/image)
+    - 350 images, ~2400 instances (6-7 labels/image)
     - Classes: Garlic Bulb, Garlic Root, Gripper
-    - RTX 5090 (24GB VRAM)
+    - RTX 5090 (32GB VRAM)
     - Polygon segmentation
     """
     
@@ -47,15 +47,15 @@ def train():
         
         # Image settings
         imgsz=640,
-        batch=12,
+        batch=-1,  # Auto batch size based on VRAM
         
         # Data augmentation (optimized for 640 instances)
         hsv_h=0.015,
-        hsv_s=0.7,
-        hsv_v=0.4,
+        hsv_s=0.5,
+        hsv_v=0.2,
         degrees=10,
         translate=0.1,
-        scale=0.5,
+        scale=0.4,
         shear=3,
         perspective=0.0003,
         flipud=0.5,
@@ -70,12 +70,12 @@ def train():
         lr0=0.001,
         lrf=0.01,
         momentum=0.937,
-        weight_decay=0.0005,
-        warmup_epochs=5.0,
+        weight_decay=0.001,
+        warmup_epochs=3.0,
         
         # Loss weights
-        box=7.5,
-        cls=0.5,
+        box=8.0,
+        cls=0.3,
         dfl=1.5,
         
         # Segmentation
@@ -151,6 +151,7 @@ def train():
     print("   from ultralytics import YOLO")
     print(f"   model = YOLO('{best_model_path}')")
     print("   results = model.predict('test_image.jpg', conf=0.25)")
+    print("3. If train/val gap < 0.10, try yolo11l-seg.pt for a potential boost")
     print("="*60)
 
 
